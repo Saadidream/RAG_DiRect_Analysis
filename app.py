@@ -145,8 +145,8 @@ class RAGPipeline:
         return retrieved_docs, summaries, answer, distances
 
 # Initialize
-samples_dir = '/data/samples'
-diagnostic_kg_dir = '/data/diagnostic_kg'
+samples_dir = 'data/samples'
+diagnostic_kg_dir = 'data/diagnostic_kg'
 documents = load_notes(samples_dir)
 knowledge_graphs = load_knowledge_graphs(diagnostic_kg_dir)
 retriever = DenseRetriever(documents)
