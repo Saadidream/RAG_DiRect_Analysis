@@ -1,6 +1,4 @@
-
-# Step 9: Streamlit App
-
+# app.py
 import streamlit as st
 import json
 import os
@@ -22,8 +20,8 @@ def load_notes(samples_dir):
                         note_data = data[0]  # Assuming one note per file
                     # Handle the case where data is not a list or is empty
                     else:
-                        # you may need to adjust this based on the actual structure of your JSON
-                        note_data = data # or note_data = data.get('key_containing_note_data') if it's a dictionary
+                        # Adjust based on actual structure; assuming data is a dict if not a list
+                        note_data = data  # or note_data = data.get('key_containing_note_data') if it's a dictionary
                     inputs = [note_data.get(f'input{i}', '') for i in range(1, 7)]
                     inputs = [inp if inp != 'None' else '' for inp in inputs]  # Handle missing values
                     sections = ['Chief Complaint', 'History of Present Illness', 'Past Medical History',
@@ -40,16 +38,26 @@ def load_knowledge_graphs(diagnostic_kg_dir):
                 kg_data[file] = json.load(f)
     return kg_data
 
-# Retriever class
+# Retriever class with local model loading
 class DenseRetriever:
     def __init__(self, documents, model_name='all-MiniLM-L6-v2'):
         self.documents = documents
-        self.model = SentenceTransformer(model_name)
+        local_model_path = 'models/all-MiniLM-L6-v2'
+        try:
+            if os.path.exists(local_model_path):
+                st.write("Loading SentenceTransformer model from local path...")
+                self.model = SentenceTransformer(local_model_path)
+            else:
+                st.write("Local model not found, attempting to download SentenceTransformer model...")
+                self.model = SentenceTransformer(model_name)
+        except Exception as e:
+            st.error(f"Failed to load SentenceTransformer model: {str(e)}")
+            raise e
         self.embeddings = self.model.encode(documents, show_progress_bar=True)
         self.dimension = self.embeddings.shape[1]
         self.index = faiss.IndexFlatL2(self.dimension)
         self.index.add(self.embeddings)
-
+    
     def get_top_k(self, query, k=3):
         query_embedding = self.model.encode([query])[0]
         distances, indices = self.index.search(np.array([query_embedding]), k)
@@ -68,9 +76,20 @@ def summarize_documents(documents, max_length=150):
 # Generator class
 class Generator:
     def __init__(self, model_name='google/flan-t5-base'):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-
+        local_model_path = 'models/google-flan-t5-base'
+        try:
+            if os.path.exists(local_model_path):
+                st.write("Loading Flan-T5 model from local path...")
+                self.tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(local_model_path)
+            else:
+                st.write("Local Flan-T5 model not found, attempting to download...")
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        except Exception as e:
+            st.error(f"Failed to load Flan-T5 model: {str(e)}")
+            raise e
+    
     def generate_answer(self, prompt):
         inputs = self.tokenizer(prompt, return_tensors='pt', max_length=512, truncation=True)
         outputs = self.model.generate(**inputs, max_length=200, num_beams=5, early_stopping=True)
@@ -94,7 +113,7 @@ def find_relevant_diseases(symptom, knowledge_graphs, synonyms):
         for step, data in kg["knowledge"].items():
             if "Symptoms" in data:
                 symptoms = data["Symptoms"].lower()
-                if (symptom_lower in symptoms or
+                if (symptom_lower in symptoms or 
                     any(syn.lower() in symptoms for syn in synonyms)):
                     relevant_diseases.append(disease_file)
                     break
@@ -103,7 +122,7 @@ def find_relevant_diseases(symptom, knowledge_graphs, synonyms):
 def format_knowledge(relevant_diseases, knowledge_graphs):
     knowledge_text = ""
     for disease_file in relevant_diseases:
-        disease_name = disease_file.replace('.json', '').replace('_', ' ')
+        disease_name = file.replace('.json', '').replace('_', ' ')
         knowledge_text += f"For {disease_name}:\n"
         kg = knowledge_graphs[disease_file]
         for step, data in kg["knowledge"].items():
@@ -122,16 +141,16 @@ class RAGPipeline:
         self.generator = generator
         self.knowledge_graphs = knowledge_graphs
         self.synonyms = ["shortness of breath", "dyspnea", "breathlessness", "sob", "difficulty breathing"]
-
+    
     def answer_query(self, query, k=3):
         symptom = extract_symptom(query)
         relevant_diseases = find_relevant_diseases(symptom, self.knowledge_graphs, self.synonyms)
         knowledge_text = format_knowledge(relevant_diseases, self.knowledge_graphs) if relevant_diseases else "No specific diagnostic criteria available."
-
+        
         retrieved_docs, distances = self.retriever.get_top_k(query, k)
         summaries = summarize_documents(retrieved_docs)
         context = '\n\n'.join(summaries)
-
+        
         prompt = (
             f"Based on the following patient cases and diagnostic criteria for diseases associated with '{symptom}', "
             f"list the possible diagnoses for a patient presenting with '{symptom}'. For each diagnosis, briefly explain "
@@ -140,18 +159,39 @@ class RAGPipeline:
             f"Diagnostic Criteria:\n{knowledge_text}\n\n"
             f"Possible Diagnoses (format as a bullet list with evidence):"
         )
-
+        
         answer = self.generator.generate_answer(prompt)
         return retrieved_docs, summaries, answer, distances
 
+# Cache data and resources
+@st.cache_data
+def load_notes_cached(samples_dir):
+    return load_notes(samples_dir)
+
+@st.cache_data
+def load_knowledge_graphs_cached(diagnostic_kg_dir):
+    return load_knowledge_graphs(diagnostic_kg_dir)
+
+@st.cache_resource
+def load_retriever(documents):
+    return DenseRetriever(documents)
+
+@st.cache_resource
+def load_generator():
+    return Generator()
+
 # Initialize
-samples_dir = 'data/samples'
-diagnostic_kg_dir = 'data/diagnostic_kg'
-documents = load_notes(samples_dir)
-knowledge_graphs = load_knowledge_graphs(diagnostic_kg_dir)
-retriever = DenseRetriever(documents)
-generator = Generator()
-rag_pipeline = RAGPipeline(retriever, generator, knowledge_graphs)
+try:
+    samples_dir = 'data/samples'
+    diagnostic_kg_dir = 'data/diagnostic_kg'
+    documents = load_notes_cached(samples_dir)
+    knowledge_graphs = load_knowledge_graphs_cached(diagnostic_kg_dir)
+    retriever = load_retriever(documents)
+    generator = load_generator()
+    pipeline = RAGPipeline(retriever, generator, knowledge_graphs)
+except Exception as e:
+    st.error(f"Failed to initialize the pipeline: {str(e)}")
+    st.stop()
 
 # Streamlit UI
 st.title("Clinical RAG System for Diagnosis")
@@ -160,15 +200,18 @@ query = st.text_input("Query (e.g., 'What is the diagnosis for a patient with sh
 
 if st.button("Get Diagnoses"):
     if query:
-        retrieved_docs, summaries, answer, distances = rag_pipeline.answer_query(query)
-        st.subheader("Retrieved Patient Cases")
-        for i, (doc, dist) in enumerate(zip(retrieved_docs, distances)):
-            with st.expander(f"Document {i+1} (Distance: {dist:.2f})"):
-                st.write(doc)
-        st.subheader("Summarized Patient Cases")
-        for summary in summaries:
-            st.write(summary)
-        st.subheader("Possible Diagnoses")
-        st.write(answer)
+        try:
+            retrieved_docs, summaries, answer, distances = pipeline.answer_query(query)
+            st.subheader("Retrieved Patient Cases")
+            for i, (doc, dist) in enumerate(zip(retrieved_docs, distances)):
+                with st.expander(f"Document {i+1} (Distance: {dist:.2f})"):
+                    st.write(doc)
+            st.subheader("Summarized Patient Cases")
+            for summary in summaries:
+                st.write(summary)
+            st.subheader("Possible Diagnoses")
+            st.write(answer)
+        except Exception as e:
+            st.error(f"Error processing query: {str(e)}")
     else:
         st.warning("Please enter a query.")
